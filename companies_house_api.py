@@ -91,3 +91,54 @@ class CompaniesHouseAPI:
         """
         return self._make_request(f"/company/{company_number}/filing-history?items_per_page={items_per_page}")
 
+    def search_officers(self, query):
+        """
+        Searches for officers by name.
+        
+        Args:
+            query (str): The search term.
+            
+        Returns:
+            dict: The JSON response from the API, or None if an error occurred.
+        """
+        return self._make_request(f"/search/officers?q={query}")
+
+    def get_officer_appointments(self, appointments_link):
+        """
+        Retrieves the appointment history for a specific officer using their appointments link.
+        
+        Args:
+            appointments_link (str): The relative URL for the officer's appointments (e.g., /officers/{officer_id}/appointments).
+            
+        Returns:
+            dict: The JSON response from the API, or None if an error occurred.
+        """
+        return self._make_request(appointments_link)
+
+    def get_officer_details(self, officer_id):
+        """
+        Retrieves details for a specific officer.
+        
+        Note: The Companies House API does not have a direct 'get officer by ID' endpoint
+        that returns comprehensive details similar to a company profile.
+        Officer details are typically found in the /search/officers results or
+        within the company's /officers endpoint. This method is a placeholder
+        and may need to be adapted based on specific data needs and API response structures.
+        
+        Args:
+            officer_id (str): The officer's ID (e.g., from search results).
+            
+        Returns:
+            dict: Placeholder response, or actual details if a suitable endpoint is found.
+        """
+        # Companies House API generally returns sufficient details in search/officers
+        # or company/{number}/officers. A direct comprehensive 'get officer by ID'
+        # endpoint for all details like a company profile is not standard.
+        # This method can be expanded if a specific detail endpoint is discovered
+        # or if aggregation from multiple company-specific officer endpoints is needed.
+        print(f"Warning: Attempted to get comprehensive officer details for ID: {officer_id}")
+        print("The Companies House API typically provides officer details within search results or company-specific officer lists.")
+        print("This method currently serves as a placeholder.")
+        return {"officer_id": officer_id, "message": "Details usually embedded in search/list results."}
+
+

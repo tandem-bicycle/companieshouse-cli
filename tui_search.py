@@ -178,157 +178,301 @@ def parse_control_percentages(natures):
     return (voting_lower, voting_upper), (shares_lower, shares_upper)
 
 
+def company_search_flow(stdscr, client):
+    help_text = "↵ Enter | Ctrl+C to Cancel/Exit"
+    input_win = draw_frame(stdscr, "Search Companies", help_text)
+    if input_win is None:
+        stdscr.getch() # Wait for user to acknowledge "Terminal too small"
+        return # Exit to main menu
+
+    input_win.addstr(1, 2, "Enter company name to search: ")
+    curses.echo()
+    curses.curs_set(1)
+    search_query = input_win.getstr(3, 2, 60).decode('utf-8')
+    curses.noecho()
+    curses.curs_set(0)
+
+    if not search_query.strip(): return # Back to main menu if no query
+
+    search_results_cache = None # Cache search results for 'back to list' 
+
+    # Inner loop for viewing search results and company details
+    while True:
+        if search_results_cache:
+            search_results = search_results_cache
+            search_results_cache = None # Clear cache after use
+        else:
+            show_status_message(stdscr, "Searching...")
+            search_results = client.search_companies(search_query)
+        
+        if not search_results or not search_results.get('items'):
+            show_status_message(stdscr, f"No companies found for '{search_query}'. Press any key for new search.")
+            stdscr.getch()
+            break # Break inner loop -> go to outer loop (new search) 
+        
+        menu_items = [f"{item.get('title')} ({item.get('company_number')})" for item in search_results['items']]
+        
+        # Call select_from_list, which now returns a navigation signal or selected item
+        selected_list_result = select_from_list(stdscr, menu_items, "Company Search Results")
+        
+        if selected_list_result == "BACK_TO_NEW_SEARCH":
+            break # Break inner loop -> go to outer loop (new search)
+        elif selected_list_result is None: # User pressed q or nothing in select_from_list and exited
+            return # Exit to main menu
+        
+        company_number = selected_list_result.split('(')[-1].replace(')', '')
+
+        # --- Step 3: Fetch Data and Prepare Tab Content ---
+        show_status_message(stdscr, "Fetching details...")
+        profile = client.get_company_profile(company_number)
+        filing = client.get_filing_history(company_number)
+        pscs = client.get_persons_with_significant_control(company_number)
+        
+        # --- Profile Tab ---
+        profile_content = ""
+        if profile:
+            profile_content += f"Name:     {profile.get('company_name')}\n"
+            profile_content += f"Status:   {profile.get('company_status')}\n"
+            address = profile.get('registered_office_address', {})
+            profile_content += f"Address:  {address.get('address_line_1')}, {address.get('postal_code')}\n"
+            profile_content += f"Type:     {profile.get('type')}\n" 
+            profile_content += f"Jurisdiction: {profile.get('jurisdiction')}\n"
+        else:
+            profile_content = "No profile data found."
+
+        # --- Filing History Tab ---
+        filing_content = ""
+        if filing and filing.get('items'):
+            for item in filing['items']:
+                marker = ""
+                description_lower = item.get('description', '').lower()
+                if "dormant" in description_lower or "active" in description_lower:
+                    marker = "*** STATUS CHANGE *** "
+                
+                filing_content += f"{marker}Date: {item.get('date', 'N/A')}\n"
+                filing_content += f"  Desc: {item.get('description', 'N/A')}\n"
+                filing_content += f"  Type: {item.get('type', 'N/A')}\n\n"
+        else:
+            filing_content = "No filing history found."
+
+        # --- PSCs Tab (with dual bar charts) ---
+        pscs_content = ""
+        if pscs and pscs.get('items'):
+            for psc in pscs['items']:
+                name = psc.get('name', 'N/A')
+                status = "Ceased" if psc.get('ceased_on') else "Active"
+                natures = psc.get('natures_of_control', [])
+                
+                (voting_lower, voting_upper), (shares_lower, shares_upper) = parse_control_percentages(natures)
+                
+                # If ceased, set percentages to 0 to reflect no current control
+                if status == "Ceased":
+                    voting_lower, voting_upper = 0, 0
+                    shares_lower, shares_upper = 0, 0
+                
+                # Bar chart dimensions
+                bar_len_scale = 10 # 1 char for every 10%
+                
+                # Voting Bar
+                voting_bar_lower_len = voting_lower // bar_len_scale
+                voting_bar_range_len = (voting_upper - voting_lower) // bar_len_scale
+                
+                # Shares Bar
+                shares_bar_lower_len = shares_lower // bar_len_scale
+                shares_bar_range_len = (shares_upper - shares_lower) // bar_len_scale
+                
+                pscs_content += f"- Name:    {name}\n"
+                pscs_content += f"  Status:  {status}\n"
+                
+                # Display Voting Bar
+                pscs_content += "  Voting:  "
+                if voting_lower > 0:
+                    pscs_content += '█' * voting_bar_lower_len
+                if voting_upper > voting_lower:
+                    pscs_content += '▓' * voting_bar_range_len
+                pscs_content += f" ({voting_lower}-{voting_upper}%) ".ljust(20) + "\n" # Ensure consistent length
+                
+                # Display Shares Bar
+                pscs_content += "  Shares:  "
+                if shares_lower > 0:
+                    pscs_content += '█' * shares_bar_lower_len
+                if shares_upper > shares_lower:
+                    pscs_content += '▓' * shares_bar_range_len
+                pscs_content += f" ({shares_lower}-{shares_upper}%) ".ljust(20) + "\n"
+                
+                pscs_content += f"  Natures: {', '.join(natures)}\n\n"
+        else:
+            pscs_content = "No Persons with Significant Control found or company is exempt."
+
+        tab_data = {
+            "Profile": profile_content,
+            "Filing History": filing_content,
+            "PSCs": pscs_content
+        }
+
+        display_tabbed_viewer_result = display_tabbed_viewer(stdscr, tab_data, f"Details for {company_number}")
+        
+        if display_tabbed_viewer_result == "BACK_TO_NEW_SEARCH":
+            break # Break inner loop -> go to outer loop (new search)
+        elif display_tabbed_viewer_result == "BACK_TO_LIST":
+            search_results_cache = search_results # Store current search results
+            continue # Continue inner loop -> go back to select_from_list
+        elif display_tabbed_viewer_result is None: # User pressed q from tabbed viewer to exit
+            return # Exit to main menu
+
+def person_search_flow(stdscr, client):
+    help_text = "↵ Enter | Ctrl+C to Cancel/Exit"
+    input_win = draw_frame(stdscr, "Search Persons", help_text)
+    if input_win is None:
+        stdscr.getch()
+        return
+
+    input_win.addstr(1, 2, "Enter person name to search: ")
+    curses.echo()
+    curses.curs_set(1)        
+    search_query = input_win.getstr(3, 2, 60).decode('utf-8')
+    curses.noecho()
+    curses.curs_set(0)
+
+    if not search_query.strip(): return
+
+    show_status_message(stdscr, "Searching...")
+    search_results = client.search_officers(search_query)
+
+    if not search_results or not search_results.get('items'):
+        show_status_message(stdscr, f"No persons found for '{search_query}'. Press any key for new search.")
+        return # Return to allow a new person search
+
+    # If search results are found, proceed to build menu and allow selection
+    menu_items = []
+    for item in search_results['items']:
+        name = item.get('title', 'N/A')
+        officer_self_link = item.get('links', {}).get('self') # This is the unique identifier
+        
+        if not officer_self_link: # Skip items without a self link
+            continue
+
+        appointment_count = item.get('appointment_count', 0)
+        
+        display_string = f"{name}"
+        if appointment_count > 0:
+            display_string += f" - Appointments: {appointment_count}"
+        
+        menu_items.append((display_string, officer_self_link)) # Store as a tuple
+    
+    # Debug prints - these will go to stdout, not TUI
+    print(f"DEBUG: menu_items constructed: {menu_items}")
+    print(f"DEBUG: len(menu_items): {len(menu_items)}")
+
+    # Inner loop for viewing search results and person details
+    while True:
+        selected_list_result_tuple = select_from_list(stdscr, [item[0] for item in menu_items], "Person Search Results")
+        print(f"DEBUG: select_from_list returned: {selected_list_result_tuple}")
+
+        if selected_list_result_tuple == "BACK_TO_NEW_SEARCH":
+            return # Return to allow a new person search
+        elif selected_list_result_tuple is None:
+            return # Exit to main menu
+        
+        # Extract unique identifier from selected_list_result_tuple
+        # Find the original tuple in menu_items based on the display string
+        selected_item = next((item_tuple for item_tuple in menu_items if item_tuple[0] == selected_list_result_tuple), None)
+
+        if not selected_item: # Should not happen if select_from_list works correctly
+            show_status_message(stdscr, "Error: Selected item not found in menu items. Press any key.")
+            stdscr.getch()
+            return
+
+        selected_officer_self_link = selected_item[1] # Get the self link from the tuple
+
+        # Find the selected officer by their unique 'self' link
+        selected_officer = next((item for item in search_results['items'] if item.get('links', {}).get('self') == selected_officer_self_link), None)
+
+        if not selected_officer:
+            show_status_message(stdscr, "Error: Could not retrieve selected officer details. Mismatch in search results. Press any key.")
+            stdscr.getch()
+            return
+
+        # Prepare tab content for the selected officer
+        profile_content = ""
+        profile_content += f"Name:             {selected_officer.get('title', 'N/A')}\n"
+        
+        address = selected_officer.get('address', {})
+        if address:
+            profile_content += f"Address:          {address.get('address_line_1', '')}, {address.get('locality', '')}, {address.get('postal_code', '')}\n"
+        profile_content += f"Country of Res:   {selected_officer.get('country_of_residence', 'N/A')}\n"
+        profile_content += f"Nationality:      {selected_officer.get('nationality', 'N/A')}\n"
+        profile_content += f"Occupation:       {selected_officer.get('occupation', 'N/A')}\n"
+        
+        # Date of birth might only be year, so display carefully
+        dob = selected_officer.get('date_of_birth', {})
+        dob_year = dob.get('year')
+        if dob_year:
+            profile_content += f"Date of Birth:    {dob.get('month', '')}/{dob_year}\n"
+
+        # Associated company information
+        links = selected_officer.get('links', {})
+        appointments_link = links.get('self') # Corrected: Use 'self' key for appointments link
+        
+        appointments_content = ""
+        if appointments_link:
+            show_status_message(stdscr, "Fetching appointments...")
+            officer_appointments = client.get_officer_appointments(appointments_link)
+            if officer_appointments and officer_appointments.get('items'):
+                for appt in officer_appointments['items']:
+                    company_name = appt.get('appointed_to', {}).get('company_name', 'N/A')
+                    company_number = appt.get('appointed_to', {}).get('company_number', 'N/A')
+                    role = appt.get('officer_role', 'N/A')
+                    appointed_on = appt.get('appointed_on', 'N/A')
+                    resigned_on = appt.get('resigned_on', 'Current')
+                    
+                    appointments_content += f"Company:   {company_name} ({company_number})\n"
+                    appointments_content += f"  Role:      {role}\n"
+                    appointments_content += f"  Appointed: {appointed_on}\n"
+                    appointments_content += f"  Resigned:  {resigned_on}\n\n"
+            else:
+                appointments_content = "No appointment history found."
+        else:
+            appointments_content = "No appointments link available."
+        
+        tab_data = {
+            "Profile": profile_content,
+            "Appointments": appointments_content # Add the new appointments tab
+        }
+
+        display_tabbed_viewer_result = display_tabbed_viewer(stdscr, tab_data, f"Details for {selected_officer.get('title', 'N/A')}")
+        
+        if display_tabbed_viewer_result == "BACK_TO_NEW_SEARCH":
+            return # Return to allow a new person search
+        elif display_tabbed_viewer_result == "BACK_TO_LIST":
+            continue # Continue inner loop -> go back to select_from_list
+        elif display_tabbed_viewer_result is None:
+            return # Exit to main menu
+
+# New main function structure
 def main(stdscr):
     """Main function to run the TUI application with full navigation."""
     curses.curs_set(0)
 
-    # Outer loop for new searches
+    try:
+        client = CompaniesHouseAPI()
+    except ValueError as e:
+        stdscr.clear()
+        stdscr.addstr(0, 0, f"API Key Error: {e}. Press any key to exit.")
+        stdscr.refresh()
+        stdscr.getch()
+        return # Exit app
+
     while True:
-        # --- Step 1: Get User Input ---
-        help_text = "↵ Enter | Ctrl+C Quit"
-        input_win = draw_frame(stdscr, "Companies House Search", help_text)
-        if input_win is None:
-            stdscr.getch() # Wait for user to acknowledge "Terminal too small"
+        menu_options = ["Search for Company", "Search for Person", "Exit"]
+        selected_option = select_from_list(stdscr, menu_options, "Main Menu")
+
+        if selected_option == "Search for Company":
+            company_search_flow(stdscr, client)
+        elif selected_option == "Search for Person":
+            person_search_flow(stdscr, client) # Call the new person search flow function here
+        elif selected_option == "Exit" or selected_option is None: # None if user quits select_from_list
             break # Exit the main loop to terminate the program
-        input_win.addstr(1, 2, "Enter company name to search: ")
-        curses.echo()
-        curses.curs_set(1)
-        search_query = input_win.getstr(3, 2, 60).decode('utf-8')
-        curses.noecho()
-        curses.curs_set(0)
-
-        if not search_query.strip(): return # Exit app if no query
-
-        try:
-            client = CompaniesHouseAPI()
-        except ValueError as e:
-            input_win.addstr(5, 2, f"API Key Error: {e}. Press any key to exit.")
-            stdscr.getch()
-            return # Exit app
-
-        search_results_cache = None # Cache search results for 'back to list'
-
-        # Inner loop for viewing search results and company details
-        while True:
-            if search_results_cache:
-                search_results = search_results_cache
-                search_results_cache = None # Clear cache after use
-            else:
-                show_status_message(stdscr, "Searching...")
-                search_results = client.search_companies(search_query)
-            
-            if not search_results or not search_results.get('items'):
-                show_status_message(stdscr, f"No companies found for '{search_query}'. Press any key for new search.")
-                stdscr.getch()
-                break # Break inner loop -> go to outer loop (new search)
-            
-            menu_items = [f"{item.get('title')} ({item.get('company_number')})" for item in search_results['items']]
-            
-            # Call select_from_list, which now returns a navigation signal or selected item
-            selected_list_result = select_from_list(stdscr, menu_items, "Search Results")
-            
-            if selected_list_result == "BACK_TO_NEW_SEARCH":
-                break # Break inner loop -> go to outer loop (new search)
-            elif selected_list_result is None: # User pressed q or nothing in select_from_list and exited
-                return # Exit app
-            
-            company_number = selected_list_result.split('(')[-1].replace(')', '')
-
-            # --- Step 3: Fetch Data and Prepare Tab Content ---
-            show_status_message(stdscr, "Fetching details...")
-            profile = client.get_company_profile(company_number)
-            filing = client.get_filing_history(company_number)
-            pscs = client.get_persons_with_significant_control(company_number)
-            
-            # --- Profile Tab ---
-            profile_content = ""
-            if profile:
-                profile_content += f"Name:     {profile.get('company_name')}\n"
-                profile_content += f"Status:   {profile.get('company_status')}\n"
-                address = profile.get('registered_office_address', {})
-                profile_content += f"Address:  {address.get('address_line_1')}, {address.get('postal_code')}\n"
-            else:
-                profile_content = "No profile data found."
-
-            # --- Filing History Tab ---
-            filing_content = ""
-            if filing and filing.get('items'):
-                for item in filing['items']:
-                    marker = ""
-                    description_lower = item.get('description', '').lower()
-                    if "dormant" in description_lower or "active" in description_lower:
-                        marker = "*** STATUS CHANGE *** "
-                    
-                    filing_content += f"{marker}Date: {item.get('date', 'N/A')}\n"
-                    filing_content += f"  Desc: {item.get('description', 'N/A')}\n"
-                    filing_content += f"  Type: {item.get('type', 'N/A')}\n\n"
-            else:
-                filing_content = "No filing history found."
-
-            # --- PSCs Tab (with dual bar charts) ---
-            pscs_content = ""
-            if pscs and pscs.get('items'):
-                for psc in pscs['items']:
-                    name = psc.get('name', 'N/A')
-                    status = "Ceased" if psc.get('ceased_on') else "Active"
-                    natures = psc.get('natures_of_control', [])
-                    
-                    (voting_lower, voting_upper), (shares_lower, shares_upper) = parse_control_percentages(natures)
-                    
-                    # If ceased, set percentages to 0 to reflect no current control
-                    if status == "Ceased":
-                        voting_lower, voting_upper = 0, 0
-                        shares_lower, shares_upper = 0, 0
-                    
-                    # Bar chart dimensions
-                    bar_len_scale = 10 # 1 char for every 10%
-                    
-                    # Voting Bar
-                    voting_bar_lower_len = voting_lower // bar_len_scale
-                    voting_bar_range_len = (voting_upper - voting_lower) // bar_len_scale
-                    
-                    # Shares Bar
-                    shares_bar_lower_len = shares_lower // bar_len_scale
-                    shares_bar_range_len = (shares_upper - shares_lower) // bar_len_scale
-                    
-                    pscs_content += f"- Name:    {name}\n"
-                    pscs_content += f"  Status:  {status}\n"
-                    
-                    # Display Voting Bar
-                    pscs_content += "  Voting:  "
-                    if voting_lower > 0:
-                        pscs_content += '█' * voting_bar_lower_len
-                    if voting_upper > voting_lower:
-                        pscs_content += '▓' * voting_bar_range_len
-                    pscs_content += f" ({voting_lower}-{voting_upper}%)".ljust(20) + "\n" # Ensure consistent length
-                    
-                    # Display Shares Bar
-                    pscs_content += "  Shares:  "
-                    if shares_lower > 0:
-                        pscs_content += '█' * shares_bar_lower_len
-                    if shares_upper > shares_lower:
-                        pscs_content += '▓' * shares_bar_range_len
-                    pscs_content += f" ({shares_lower}-{shares_upper}%)".ljust(20) + "\n"
-                    
-                    pscs_content += f"  Natures: {', '.join(natures)}\n\n"
-            else:
-                pscs_content = "No Persons with Significant Control found or company is exempt."
-
-            tab_data = {
-                "Profile": profile_content,
-                "Filing History": filing_content,
-                "PSCs": pscs_content
-            }
-
-            display_tabbed_viewer_result = display_tabbed_viewer(stdscr, tab_data, f"Details for {company_number}")
-            
-            if display_tabbed_viewer_result == "BACK_TO_NEW_SEARCH":
-                break # Break inner loop -> go to outer loop (new search)
-            elif display_tabbed_viewer_result == "BACK_TO_LIST":
-                search_results_cache = search_results # Store current search results
-                continue # Continue inner loop -> go back to select_from_list
-            elif display_tabbed_viewer_result is None: # User pressed q from tabbed viewer to exit
-                return # Exit app
 
 if __name__ == "__main__":
     curses.wrapper(main)
